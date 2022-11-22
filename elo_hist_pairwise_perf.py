@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-
-
+An extension of Elo ratings to account for historical pairwise performance between pairs of teams.
+Adapted from code from the following Kaggle repositories:
+    https://www.kaggle.com/code/andreiavadanei/elo-predicting-against-dataset
+    https://www.kaggle.com/kplauritzen/march-machine-learning-mania-2017/elo-ratings-in-python
+Author: Rory Bunker
 """
 import pandas as pd
 from sklearn.preprocessing import LabelEncoder
@@ -20,7 +23,7 @@ elo_width = 400
 k_factor = 32
 n_samples = 8000
 start_year = 2012
-end_year = 2017
+end_year = 2016
 elo_type = 'std' # or 'hpp'
 epsilon = 1e-15
 
@@ -44,6 +47,7 @@ def defineUpset(row):
         row['upset'] = 'N'
     return row
     # ginf.to_csv('elo.csv', index=False)
+    
 def getWinner(row):
     if row['fthg'] > row['ftag']: #Home Win
         return (row['ht'], row['at'], 1-epsilon)
@@ -295,7 +299,7 @@ def main():
     
     print("Predicting...")
     
-    loss, conf_matrix, y_predicted, y_predicted_binary, y_true = predict(ginf, 2013, 2014, optimal_alpha)
+    loss, conf_matrix, y_predicted, y_predicted_binary, y_true = predict(ginf, 2017, 2017, optimal_alpha)
     
     print(y_predicted[:10])
     print("Confusion matrix: ")
