@@ -329,7 +329,7 @@ def main():
     print("Training...")
     
     if optimize == 'Y':
-        res = minimize(train, x0=100, method = 'Nelder-Mead', args=(ginf,n_teams,elo_type))
+        res = minimize(train, x0=init_fixed_val, method = 'Nelder-Mead', args=(ginf,n_teams,elo_type))
         print(res)
         optimal_beta = res.x
         print("Predicting...")
