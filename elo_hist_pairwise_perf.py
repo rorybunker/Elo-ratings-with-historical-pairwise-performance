@@ -23,7 +23,7 @@ elo_width = 400
 k_factor = 32
 n_samples = 8000
 start_year = 2012
-end_year = 2016
+end_year = 2017
 elo_type = 'std' # or 'hpp'
 epsilon = 1e-15
 
@@ -282,6 +282,7 @@ def main():
     
     print("Training...")
     res = minimize(train, x0=100, method = 'Nelder-Mead', args=(ginf,n_teams))
+    # train(100, ginf, n_teams)
     print(res)
     # print(res.train)
     
@@ -298,8 +299,8 @@ def main():
     #    print(year, "mean:", s.mean() , "min:", s.min(), "max:", s.max())
     
     print("Predicting...")
-    
-    loss, conf_matrix, y_predicted, y_predicted_binary, y_true = predict(ginf, 2017, 2017, optimal_alpha)
+    # loss, conf_matrix, y_predicted, y_predicted_binary, y_true = predict(ginf, 2013, 2017, 100)
+    loss, conf_matrix, y_predicted, y_predicted_binary, y_true = predict(ginf, 2013, 2017, optimal_alpha)
     
     print(y_predicted[:10])
     print("Confusion matrix: ")
