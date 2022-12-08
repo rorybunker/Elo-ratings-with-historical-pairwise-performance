@@ -4,7 +4,8 @@ An extension of Elo ratings to account for historical pairwise performance betwe
 Adapted from code from the following Kaggle repositories:
     https://www.kaggle.com/code/andreiavadanei/elo-predicting-against-dataset
     https://www.kaggle.com/kplauritzen/march-machine-learning-mania-2017/elo-ratings-in-python
-Author: Rory Bunker
+
+Authors: Rory Bunker, Calvin C.K. Yeung
 """
 import pandas as pd
 from sklearn.preprocessing import LabelEncoder
@@ -22,13 +23,14 @@ elo_width = 400
 k_factor = 32
 train_start_year = 2012
 train_end_year = 2017
-predict_start_year = 2013
+predict_start_year = 2012
 predict_end_year = 2017
-elo_type = 'hpp' # or 'std'
-optimize = 'N' # or 'N'
-class_to_combine_draws_with = 'A' # or 'H'
+elo_type = 'std' # or 'hpp'
+optimize = 'N' # or 'Y'
+class_to_combine_draws_with = 'H' # or 'A'
 init_fixed_val = 100
 epsilon = 1e-15
+regress_towards_mean = 'Y' # or 'N'
 
 #import argparse
 
@@ -209,7 +211,7 @@ def update_end_of_season(elos):
     elos -= diff_from_mean/3
     return elos
 
-def train(beta, ginf, n_teams, elo_type):
+def fit(beta, ginf, n_teams, elo_type):
     elo_per_season = {}
     current_elos   = np.ones(shape=(n_teams)) * mean_elo
 
@@ -252,13 +254,15 @@ def train(beta, ginf, n_teams, elo_type):
             current_elos[at_id] = at_elo_after
         
         elo_per_season[year] = current_elos.copy()
-        current_elos = update_end_of_season(current_elos)
+        if regress_towards_mean == 'Y':
+            current_elos = update_end_of_season(current_elos)
     #ginf.head()
     if optimize == 'Y':
         return log_loss(y_true[1:].tolist(), y_predicted[1:].tolist())
 
 def predict(ginf, predict_start_year, predict_end_year, beta):
-    ginf_pred = ginf[(ginf.season >= predict_start_year) & (ginf.season < predict_end_year)]
+    #n_samples = 8000
+    ginf_pred = ginf[(ginf.season >= predict_start_year) & (ginf.season <= predict_end_year)]#.sample(n_samples)
     
     #y_true    = []
     #y_predicted = []
@@ -329,20 +333,20 @@ def main():
     print("Training...")
     
     if optimize == 'Y':
-        res = minimize(train, x0=init_fixed_val, method = 'Nelder-Mead', args=(ginf,n_teams,elo_type))
+        res = minimize(fit, x0=init_fixed_val, method = 'Nelder-Mead', args=(ginf,n_teams,elo_type))
         print(res)
         optimal_beta = res.x
         print("Predicting...")
         loss, conf_matrix, y_predicted, y_predicted_binary, y_true = predict(ginf, predict_start_year, predict_end_year, optimal_beta)
     elif optimize == 'N':
-        train(init_fixed_val, ginf, n_teams, elo_type)
+        fit(init_fixed_val, ginf, n_teams, elo_type)
         print("Predicting...")
         loss, conf_matrix, y_predicted, y_predicted_binary, y_true = predict(ginf, predict_start_year, predict_end_year, init_fixed_val)
     else:
         sys.exit("ERROR: optimize must be set to Y or N")
 
     #for a in range(0, 1000, 10):
-    #    log_loss = train(a, ginf, n_teams)
+    #    log_loss = fit(a, ginf, n_teams)
     #    print(log_loss, a)
     
     #for year in range(start_year, end_year + 1):
