@@ -22,13 +22,14 @@ mean_elo = 1500
 elo_width = 400
 k_factor = 32
 train_start_year = 2012
-train_end_year = 2017
-predict_start_year = 2012
+train_end_year = 2016
+predict_start_year = 2017
 predict_end_year = 2017
 elo_type = 'std' # or 'hpp'
 optimize = 'N' # or 'Y'
-class_to_combine_draws_with = 'H' # or 'A'
-init_fixed_val = 100
+class_to_combine_draws_with = 'A' # or 'H'
+init_beta = 100
+init_alpha = 100
 epsilon = 1e-15
 regress_towards_mean = 'Y' # or 'N'
 
@@ -119,33 +120,22 @@ def get_matches_and_upsets(ginf, home_team_id, away_team_id, date_minus_one):
 
     return m_ha, u_ht, u_at
 
-def expected_score(rating_a, rating_b, h_ab):
+def expected_score(rating_a, rating_b, alpha):
     """Returns the expected score for a game between the specified players
     http://footballdatabase.com/methodology.php
     """
-    W_e = 1.0/(1+10**((-(rating_b - rating_a + h_ab))/elo_width))
-    
+    # W_e = 1.0/(1+10**((-(rating_b - rating_a + h_ab))/elo_width))
+    W_e = 1.0/(1+10**((rating_b - rating_a - alpha)/elo_width))
     return W_e
 
-# def expected_score_hpp(rating_a, rating_b, u_ab, u_ba, beta, matches_ab):
-#     """Returns the expected score for a game between the specified players, incorporating the historical unexpected results between them
-#     """
-#     if matches_ab == 0:
-#         coefficient = 1
-#     else:
-#         coefficient = beta/matches_ab
-    
-#     W_e = 1.0/(1+10**((-(rating_a - rating_b + (coefficient*(u_ab - u_ba)))/elo_width)))
-    
-#     return W_e
-
-def expected_score_hpp(rating_a, rating_b, u_ab, u_ba, beta, matches_ab):
+def expected_score_hpp(rating_a, rating_b, u_ab, u_ba, alpha, beta, matches_ab):
     """Returns the expected score for a game between the specified players, incorporating the historical unexpected results between them
     """
     if matches_ab == 0:
-        W_e = 1.0/(1+10**((-(rating_a - rating_b)/elo_width)))
+        W_e = 1.0/(1+10**((rating_b - rating_a - alpha)/elo_width))
     else:
-        W_e = 1.0/(1+10**((-(rating_a - rating_b + ((beta/matches_ab)*(u_ab - u_ba)))/elo_width)))    
+        W_e = 1.0/(1+10**((rating_b - rating_a - alpha - (beta/matches_ab)*(u_ba - u_ab))/elo_width))
+        # W_e = 1.0/(1+10**((-(rating_a - rating_b + ((beta/matches_ab)*(u_ab - u_ba)))/elo_width)))    
 
     return W_e
 
@@ -161,12 +151,12 @@ def get_k_factor(rating, goals=0):
 
     return k_factor*((11+goals)/8)
 
-def calculate_new_elos(rating_a, rating_b, score_a, goals, home_adv):
+def calculate_new_elos(rating_a, rating_b, score_a, goals, alpha):
     """Calculates and returns the new Elo ratings for two players.
     score_a is 1 for a win by player A, 0 for a loss by player A, or 0.5 for a draw.
     """
 
-    e_a = expected_score(rating_a, rating_b, home_adv)
+    e_a = expected_score(rating_a, rating_b, alpha)
     e_b = 1 - e_a
     if goals > 0:
         a_k = get_k_factor(rating_a, goals)
@@ -180,11 +170,11 @@ def calculate_new_elos(rating_a, rating_b, score_a, goals, home_adv):
     new_rating_b = rating_b + b_k * (score_b - e_b)
     return new_rating_a, new_rating_b
 
-def calculate_new_elos_hpp(rating_a, rating_b, score_a, goals, u_ab, u_ba, m, beta):
+def calculate_new_elos_hpp(rating_a, rating_b, score_a, goals, u_ab, u_ba, m, alpha, beta):
     """Calculates and returns the new Elo ratings for two teams.
     score_a is 1 for a win by team A, 0 for a loss by team A, or 0.5 for a draw.
     """
-    e_a = expected_score_hpp(rating_a, rating_b, u_ab, u_ba, beta, m)
+    e_a = expected_score_hpp(rating_a, rating_b, u_ab, u_ba, alpha, beta, m)
     e_b = 1 - e_a
     
     if goals > 0:
@@ -211,7 +201,7 @@ def update_end_of_season(elos):
     elos -= diff_from_mean/3
     return elos
 
-def fit(beta, ginf, n_teams, elo_type):
+def train(alpha_beta, ginf, n_teams, elo_type):
     elo_per_season = {}
     current_elos   = np.ones(shape=(n_teams)) * mean_elo
 
@@ -233,12 +223,12 @@ def fit(beta, ginf, n_teams, elo_type):
             # y_true.append(game.result)
             
             if elo_type == 'std':
-                ht_elo_after, at_elo_after = calculate_new_elos(ht_elo_before, at_elo_before, score, game['fthg']-game['ftag'], beta)
-                y_predicted = np.append(y_predicted, expected_score(ht_elo_before, at_elo_before, beta))
+                ht_elo_after, at_elo_after = calculate_new_elos(ht_elo_before, at_elo_before, score, game['fthg']-game['ftag'], alpha_beta[0])
+                y_predicted = np.append(y_predicted, expected_score(ht_elo_before, at_elo_before, alpha_beta[0]))
                 # y_predicted.append(expected_score(ht_elo_before, at_elo_before, beta))
             elif elo_type == 'hpp':
-                ht_elo_after, at_elo_after = calculate_new_elos_hpp(ht_elo_before, at_elo_before, score, game['fthg']-game['ftag'], u_ha, u_ah, m, beta)
-                y_predicted = np.append(y_predicted, expected_score_hpp(ht_elo_before, at_elo_before, u_ha, u_ah, beta, m))
+                ht_elo_after, at_elo_after = calculate_new_elos_hpp(ht_elo_before, at_elo_before, score, game['fthg']-game['ftag'], u_ha, u_ah, m, alpha_beta[0], alpha_beta[1])
+                y_predicted = np.append(y_predicted, expected_score_hpp(ht_elo_before, at_elo_before, u_ha, u_ah, alpha_beta[0], alpha_beta[1], m))
                 # y_predicted.append(expected_score_hpp(ht_elo_before, at_elo_before, u_ha, u_ah, beta, m))
             else:
                 sys.exit('ERROR: elo_type must be set to std or hpp')
@@ -254,13 +244,14 @@ def fit(beta, ginf, n_teams, elo_type):
             current_elos[at_id] = at_elo_after
         
         elo_per_season[year] = current_elos.copy()
+        
         if regress_towards_mean == 'Y':
             current_elos = update_end_of_season(current_elos)
     #ginf.head()
     if optimize == 'Y':
         return log_loss(y_true[1:].tolist(), y_predicted[1:].tolist())
 
-def predict(ginf, predict_start_year, predict_end_year, beta):
+def predict(ginf, predict_start_year, predict_end_year, alpha, beta):
     #n_samples = 8000
     ginf_pred = ginf[(ginf.season >= predict_start_year) & (ginf.season <= predict_end_year)]#.sample(n_samples)
     
@@ -273,9 +264,9 @@ def predict(ginf, predict_start_year, predict_end_year, beta):
         ht_elo      = row.ht_elo_before_game
         at_elo      = row.at_elo_before_game
         if elo_type == 'std':
-            w_expected = expected_score(ht_elo, at_elo, beta)
+            w_expected = expected_score(ht_elo, at_elo, alpha)
         elif elo_type == 'hpp':
-            w_expected = expected_score_hpp(ht_elo, at_elo, row.uw_ht, row.uw_at, beta, row.m_ha)
+            w_expected = expected_score_hpp(ht_elo, at_elo, row.uw_ht, row.uw_at, alpha, beta, row.m_ha)
         
         y_true = np.append(y_true, row.result)
         y_predicted = np.append(y_predicted, w_expected)
@@ -333,20 +324,22 @@ def main():
     print("Training...")
     
     if optimize == 'Y':
-        res = minimize(fit, x0=init_fixed_val, method = 'Nelder-Mead', args=(ginf,n_teams,elo_type))
+        initial_guess = [init_alpha, init_beta]
+        res = minimize(train, x0=initial_guess, method = 'Nelder-Mead', args=(ginf,n_teams,elo_type))
         print(res)
-        optimal_beta = res.x
+        optimal_alpha = res.x[0]
+        optimal_beta = res.x[1]
         print("Predicting...")
-        loss, conf_matrix, y_predicted, y_predicted_binary, y_true = predict(ginf, predict_start_year, predict_end_year, optimal_beta)
+        loss, conf_matrix, y_predicted, y_predicted_binary, y_true = predict(ginf, predict_start_year, predict_end_year, optimal_alpha, optimal_beta)
     elif optimize == 'N':
-        fit(init_fixed_val, ginf, n_teams, elo_type)
+        train([init_alpha, init_beta], ginf, n_teams, elo_type)
         print("Predicting...")
-        loss, conf_matrix, y_predicted, y_predicted_binary, y_true = predict(ginf, predict_start_year, predict_end_year, init_fixed_val)
+        loss, conf_matrix, y_predicted, y_predicted_binary, y_true = predict(ginf, predict_start_year, predict_end_year, init_alpha, init_beta)
     else:
         sys.exit("ERROR: optimize must be set to Y or N")
 
     #for a in range(0, 1000, 10):
-    #    log_loss = fit(a, ginf, n_teams)
+    #    log_loss = predict(a, ginf, n_teams)
     #    print(log_loss, a)
     
     #for year in range(start_year, end_year + 1):
@@ -357,9 +350,9 @@ def main():
     print("Confusion matrix: ")
     print(conf_matrix)
     if class_to_combine_draws_with == 'A':
-        print(classification_report(y_true[1:].tolist(), y_predicted_binary, target_names=['away win/draw', 'home win']))
+        print(classification_report(y_true[1:].tolist(), y_predicted_binary, target_names=['away win/draw', 'home win'], zero_division=0))
     elif class_to_combine_draws_with == 'H':
-        print(classification_report(y_true[1:].tolist(), y_predicted_binary, target_names=['away win', 'home win/draw']))
+        print(classification_report(y_true[1:].tolist(), y_predicted_binary, target_names=['away win', 'home win/draw'], zero_division=0))
     #sns.distplot(y_predicted, kde=False, bins=20)
     #plt.xlabel('Elo Expected Wins for Actual Winner')
     #plt.ylabel('Counts')
