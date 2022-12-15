@@ -22,15 +22,14 @@ mean_elo = 1500
 elo_width = 400
 k_factor = 32
 train_start_year = 2012
-train_end_year = 2016
-predict_start_year = 2017
-predict_end_year = 2017
-elo_type = 'std' # or 'hpp'
-optimize = 'N' # or 'Y'
-class_to_combine_draws_with = 'A' # or 'H'
-init_beta = 100
+predict_start_year = 2013
+end_year = 2017
+elo_type = 'hpp' # or 'hpp'
+optimize = 'Y' # or 'Y'
+class_to_combine_draws_with = 'A' # or 'H' or 'N' ('N' is not currently working)
+init_beta = 100 # will always be zero if elo_type is std
 init_alpha = 100
-epsilon = 1e-15
+# epsilon = 1e-15
 regress_towards_mean = 'Y' # or 'N'
 
 #import argparse
@@ -40,9 +39,8 @@ regress_towards_mean = 'Y' # or 'N'
 #parser.add_argument('-w', '--elo_width', type=int, required=False, default=400, help='Elo width, i.e., the value the ratings differential gets divided by. Default = 400.')
 #parser.add_argument('-k', '--k_factor', type=int, required=False, default=32, help='Value of the K-factor. Default = 32.')
 #parser.add_argument('-ts', '--train_start_year', type=int, required=False, default=2012, help='Start year for training. Default = 2012.')
-#parser.add_argument('-te', '--train_end_year', type=int, required=False, default=2017, help='End year for training. Default = 2017.')
+#parser.add_argument('-e', '--end_year', type=int, required=False, default=2017, help='End year for training. Default = 2017.')
 #parser.add_argument('-ps', '--predict_start_year', type=int, required=False, default=2013, help='Start year for prediction. Default = 2013.')
-#parser.add_argument('-pe', '--predict_end_year', type=int, required=False, default=2014, help='End year for prediction. Default = 2017.')
 #parser.add_argument('-t', '--elo_type', type=str, required=True, help='Whether to run standard Elo (std) or Elo with historical pairwise performance (hpp)')
 #parser.add_argument('-a', '--alpha', type=int, required=False, help='Starting value for alpha. Default = 100.')
 #args, _ = parser.parse_known_args()
@@ -66,6 +64,15 @@ def defineWinner(row):
         #    row['result'] = 0.5  # 'Tie'
         else:  # For when scores are missing, etc (should be none)
             row['result'] = None
+    elif class_to_combine_draws_with == 'N':
+        if row['fthg'] > row['ftag']:
+            row['result'] = 1 # 'Home team win'
+        elif row['ftag'] > row['fthg']:
+            row['result'] = 0  # 'Away team win'
+        elif row['fthg'] == row['ftag']:
+            row['result'] = 0.5  # 'Draw'
+        else:  # For when scores are missing, etc (should be none)
+            row['result'] = None
     return row
 
 def defineUpset(row):
@@ -85,19 +92,34 @@ def defineUpset(row):
         else:
             row['upset'] = 'N'
         return row
+    elif class_to_combine_draws_with == 'N':
+        if 1 / row['odd_h'] > 1 / row['odd_a'] and row['fthg'] < row['ftag']:
+            row['upset'] = 'UL'
+        elif 1 / row['odd_h'] < 1 / row['odd_a'] and row['fthg'] > row['ftag']:
+            row['upset'] = 'UW'
+        else:
+            row['upset'] = 'N'
+        return row
     # ginf.to_csv('elo.csv', index=False)
     
 def getWinner(row):
     if class_to_combine_draws_with == 'A':
         if row['fthg'] > row['ftag']: #Home Win
-            return (row['ht'], row['at'], 1-epsilon)
+            return (row['ht'], row['at'], 1)
         elif row['ftag'] >= row['fthg']: #Away Win or draw
-            return (row['ht'], row['at'], epsilon)
+            return (row['ht'], row['at'], 0)
     elif class_to_combine_draws_with == 'H':
         if row['fthg'] >= row['ftag']: #Home Win or draw
-            return (row['ht'], row['at'], 1-epsilon)
+            return (row['ht'], row['at'], 1)
         elif row['ftag'] > row['fthg']: #Away Win
-            return (row['ht'], row['at'], epsilon)
+            return (row['ht'], row['at'], 0)
+    elif class_to_combine_draws_with == 'N':
+        if row['fthg'] > row['ftag']: #Home Win
+            return (row['ht'], row['at'], 1)
+        elif row['ftag'] > row['fthg']: #Away Win
+            return (row['ht'], row['at'], 0)
+        elif row['fthg'] == row['ftag']: #Draw
+            return (row['ht'], row['at'], 0.5)
     #elif row['fthg'] == row['ftag']: #Tie
     #    return (row['ht'], row['at'], 0.5)
     #else
@@ -125,16 +147,16 @@ def expected_score(rating_a, rating_b, alpha):
     http://footballdatabase.com/methodology.php
     """
     # W_e = 1.0/(1+10**((-(rating_b - rating_a + h_ab))/elo_width))
-    W_e = 1.0/(1+10**((rating_b - rating_a - alpha)/elo_width))
+    W_e = 1.0/(1+10**((rating_b - rating_a + alpha)/elo_width))
     return W_e
 
 def expected_score_hpp(rating_a, rating_b, u_ab, u_ba, alpha, beta, matches_ab):
     """Returns the expected score for a game between the specified players, incorporating the historical unexpected results between them
     """
     if matches_ab == 0:
-        W_e = 1.0/(1+10**((rating_b - rating_a - alpha)/elo_width))
+        W_e = 1.0/(1+10**((rating_b - rating_a + alpha)/elo_width))
     else:
-        W_e = 1.0/(1+10**((rating_b - rating_a - alpha - (beta/matches_ab)*(u_ba - u_ab))/elo_width))
+        W_e = 1.0/(1+10**((rating_b - rating_a + alpha + (beta/matches_ab)*(u_ba - u_ab))/elo_width))
         # W_e = 1.0/(1+10**((-(rating_a - rating_b + ((beta/matches_ab)*(u_ab - u_ba)))/elo_width)))    
 
     return W_e
@@ -208,7 +230,7 @@ def train(alpha_beta, ginf, n_teams, elo_type):
     y_true = np.empty(1, dtype=object)
     y_predicted = np.empty(1, dtype=object)
     
-    for year in range(train_start_year, train_end_year + 1):
+    for year in range(train_start_year, end_year + 1):
         games = ginf[ginf['season']==year]
         
         for idx, game in games.iterrows():
@@ -251,9 +273,9 @@ def train(alpha_beta, ginf, n_teams, elo_type):
     if optimize == 'Y':
         return log_loss(y_true[1:].tolist(), y_predicted[1:].tolist())
 
-def predict(ginf, predict_start_year, predict_end_year, alpha, beta):
+def predict(ginf, predict_start_year, end_year, alpha, beta):
     #n_samples = 8000
-    ginf_pred = ginf[(ginf.season >= predict_start_year) & (ginf.season <= predict_end_year)]#.sample(n_samples)
+    ginf_pred = ginf[(ginf.season >= predict_start_year) & (ginf.season <= end_year)]#.sample(n_samples)
     
     #y_true    = []
     #y_predicted = []
@@ -321,20 +343,25 @@ def main():
     
     ginf, n_teams = import_preprocess_data('ginf.csv')
     
-    print("Training...")
-    
     if optimize == 'Y':
         initial_guess = [init_alpha, init_beta]
+        print("Optimizing...")
         res = minimize(train, x0=initial_guess, method = 'Nelder-Mead', args=(ginf,n_teams,elo_type))
         print(res)
         optimal_alpha = res.x[0]
         optimal_beta = res.x[1]
         print("Predicting...")
-        loss, conf_matrix, y_predicted, y_predicted_binary, y_true = predict(ginf, predict_start_year, predict_end_year, optimal_alpha, optimal_beta)
+        loss, conf_matrix, y_predicted, y_predicted_binary, y_true = predict(ginf, predict_start_year, end_year, optimal_alpha, optimal_beta)
     elif optimize == 'N':
-        train([init_alpha, init_beta], ginf, n_teams, elo_type)
-        print("Predicting...")
-        loss, conf_matrix, y_predicted, y_predicted_binary, y_true = predict(ginf, predict_start_year, predict_end_year, init_alpha, init_beta)
+        print("Training...")
+        if elo_type == 'hpp':
+            train([init_alpha, init_beta], ginf, n_teams, elo_type)
+            print("Predicting...")
+            loss, conf_matrix, y_predicted, y_predicted_binary, y_true = predict(ginf, predict_start_year, end_year, init_alpha, init_beta)
+        elif elo_type == 'std':
+            train([init_alpha, 0], ginf, n_teams, elo_type)
+            print("Predicting...")
+            loss, conf_matrix, y_predicted, y_predicted_binary, y_true = predict(ginf, predict_start_year, end_year, init_alpha, 0)
     else:
         sys.exit("ERROR: optimize must be set to Y or N")
 
@@ -346,7 +373,7 @@ def main():
     #    s = elo_per_season[year]
     #    print(year, "mean:", s.mean() , "min:", s.min(), "max:", s.max())
     
-    print(y_predicted[1:10])
+    print(y_predicted[1:10]) # print first results just to check
     print("Confusion matrix: ")
     print(conf_matrix)
     if class_to_combine_draws_with == 'A':
