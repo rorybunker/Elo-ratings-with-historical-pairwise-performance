@@ -7,6 +7,7 @@ Adapted from code from the following Kaggle repositories:
 
 Authors: Rory Bunker, Calvin C.K. Yeung
 """
+
 import pandas as pd
 from sklearn.preprocessing import LabelEncoder
 import numpy as np
@@ -15,6 +16,7 @@ import seaborn as sns  # more plotting
 from sklearn.metrics import confusion_matrix
 from sklearn.metrics import classification_report
 from sklearn.metrics import log_loss
+from sklearn import preprocessing
 from scipy.optimize import minimize
 import sys
 
@@ -24,25 +26,19 @@ k_factor = 32
 train_start_year = 2012
 predict_start_year = 2013
 end_year = 2017
-elo_type = 'hpp' # or 'hpp'
-optimize = 'Y' # or 'Y'
-class_to_combine_draws_with = 'A' # or 'H' or 'N' ('N' is not currently working)
-init_beta = 100 # will always be zero if elo_type is std
+elo_type = 'std' # standard elo 'std' or the proposed historical pairwise performance Elo method 'hpp'
+optimize = 'Y' # 'Y' or 'N' - whether or not to optimize the alpha and/or beta model parameters based on log loss using scipy minimize
+class_to_combine_draws_with = 'N' # or 'H' or 'N' ('N' means don't combine with draws - i.e., have three class problem - it is not currently finished)
+drop_draws = 'Y'
+init_beta = 0 # will always be zero if elo_type is std
 init_alpha = 100
-# epsilon = 1e-15
-regress_towards_mean = 'Y' # or 'N'
+regress_towards_mean = 'N' # or 'N'
+k_factor_type = 'fixed' # fixed as per the k_factor value set above, or goals-based k-factor, which multiplies K by G (see 'Number of goals - Obtaining the G value' https://footballdatabase.com/methodology.php)
 
 #import argparse
 
 #parser = argparse.ArgumentParser()
 #parser.add_argument('-m', '--mean_elo', type=int, required=False, default=1500, help='Mean (starting) Elo rating. Default = 1500.')
-#parser.add_argument('-w', '--elo_width', type=int, required=False, default=400, help='Elo width, i.e., the value the ratings differential gets divided by. Default = 400.')
-#parser.add_argument('-k', '--k_factor', type=int, required=False, default=32, help='Value of the K-factor. Default = 32.')
-#parser.add_argument('-ts', '--train_start_year', type=int, required=False, default=2012, help='Start year for training. Default = 2012.')
-#parser.add_argument('-e', '--end_year', type=int, required=False, default=2017, help='End year for training. Default = 2017.')
-#parser.add_argument('-ps', '--predict_start_year', type=int, required=False, default=2013, help='Start year for prediction. Default = 2013.')
-#parser.add_argument('-t', '--elo_type', type=str, required=True, help='Whether to run standard Elo (std) or Elo with historical pairwise performance (hpp)')
-#parser.add_argument('-a', '--alpha', type=int, required=False, help='Starting value for alpha. Default = 100.')
 #args, _ = parser.parse_known_args()
 
 def defineWinner(row):
@@ -51,18 +47,14 @@ def defineWinner(row):
             row['result'] = 1  # 'Home win'
         elif row['ftag'] >= row['fthg']:
             row['result'] = 0  # 'Away win or draw'
-        # elif row['fthg'] == row['ftag']:
-        #    row['result'] = 0.5  # 'Tie'
-        else:  # For when scores are missing, etc (should be none)
+        else:
             row['result'] = None
     elif class_to_combine_draws_with == 'H':
         if row['fthg'] >= row['ftag']:
             row['result'] = 1  # 'Home win or draw'
         elif row['ftag'] > row['fthg']:
             row['result'] = 0  # 'Away win'
-        # elif row['fthg'] == row['ftag']:
-        #    row['result'] = 0.5  # 'Tie'
-        else:  # For when scores are missing, etc (should be none)
+        else:
             row['result'] = None
     elif class_to_combine_draws_with == 'N':
         if row['fthg'] > row['ftag']:
@@ -71,7 +63,7 @@ def defineWinner(row):
             row['result'] = 0  # 'Away team win'
         elif row['fthg'] == row['ftag']:
             row['result'] = 0.5  # 'Draw'
-        else:  # For when scores are missing, etc (should be none)
+        else:
             row['result'] = None
     return row
 
@@ -100,16 +92,15 @@ def defineUpset(row):
         else:
             row['upset'] = 'N'
         return row
-    # ginf.to_csv('elo.csv', index=False)
     
 def getWinner(row):
     if class_to_combine_draws_with == 'A':
         if row['fthg'] > row['ftag']: #Home Win
             return (row['ht'], row['at'], 1)
-        elif row['ftag'] >= row['fthg']: #Away Win or draw
+        elif row['ftag'] >= row['fthg']: #Away Win or Draw
             return (row['ht'], row['at'], 0)
     elif class_to_combine_draws_with == 'H':
-        if row['fthg'] >= row['ftag']: #Home Win or draw
+        if row['fthg'] >= row['ftag']: #Home Win or Draw
             return (row['ht'], row['at'], 1)
         elif row['ftag'] > row['fthg']: #Away Win
             return (row['ht'], row['at'], 0)
@@ -120,13 +111,10 @@ def getWinner(row):
             return (row['ht'], row['at'], 0)
         elif row['fthg'] == row['ftag']: #Draw
             return (row['ht'], row['at'], 0.5)
-    #elif row['fthg'] == row['ftag']: #Tie
-    #    return (row['ht'], row['at'], 0.5)
-    #else
-    #    return (None, None)
     
 def get_matches_and_upsets(ginf, home_team_id, away_team_id, date_minus_one):
-    """Obtains the number of matches and upset wins for a specific home team and away team prior to a specified date"""
+    """Obtains the number of matches and upset wins for a specific home team and away team prior to a specified date
+    """
     home_team = home_team_id
     away_team = away_team_id
     
@@ -143,22 +131,21 @@ def get_matches_and_upsets(ginf, home_team_id, away_team_id, date_minus_one):
     return m_ha, u_ht, u_at
 
 def expected_score(rating_a, rating_b, alpha):
-    """Returns the expected score for a game between the specified players
+    """Returns the expected score for a game between the specified teams
     http://footballdatabase.com/methodology.php
     """
-    # W_e = 1.0/(1+10**((-(rating_b - rating_a + h_ab))/elo_width))
-    W_e = 1.0/(1+10**((rating_b - rating_a + alpha)/elo_width))
+    W_e = 1.0/(1+10**((rating_b - rating_a - alpha)/elo_width))
+    
     return W_e
 
 def expected_score_hpp(rating_a, rating_b, u_ab, u_ba, alpha, beta, matches_ab):
-    """Returns the expected score for a game between the specified players, incorporating the historical unexpected results between them
+    """Returns the expected score for a game between the specified teams, incorporating the historical unexpected results between them
     """
     if matches_ab == 0:
-        W_e = 1.0/(1+10**((rating_b - rating_a + alpha)/elo_width))
+        W_e = 1.0/(1+10**((rating_b - rating_a - alpha)/elo_width))
     else:
-        W_e = 1.0/(1+10**((rating_b - rating_a + alpha + (beta/matches_ab)*(u_ba - u_ab))/elo_width))
-        # W_e = 1.0/(1+10**((-(rating_a - rating_b + ((beta/matches_ab)*(u_ab - u_ba)))/elo_width)))    
-
+        W_e = 1.0/(1+10**((rating_b - rating_a - alpha + ((beta/matches_ab)*(u_ba - u_ab)))/elo_width))
+    
     return W_e
 
 def get_k_factor(rating, goals=0):
@@ -177,19 +164,25 @@ def calculate_new_elos(rating_a, rating_b, score_a, goals, alpha):
     """Calculates and returns the new Elo ratings for two players.
     score_a is 1 for a win by player A, 0 for a loss by player A, or 0.5 for a draw.
     """
-
     e_a = expected_score(rating_a, rating_b, alpha)
     e_b = 1 - e_a
-    if goals > 0:
-        a_k = get_k_factor(rating_a, goals)
-        b_k = get_k_factor(rating_b)
-    else:
-        a_k = get_k_factor(rating_a)
-        b_k = get_k_factor(rating_b, goals)
+    
+    if k_factor_type == 'goals':
+        # K*G (see 'Number of goals - Obtaining the G value' https://footballdatabase.com/methodology.php)
+        if goals > 0:
+            a_k = get_k_factor(rating_a, goals)
+            b_k = get_k_factor(rating_b)
+        else:
+            a_k = get_k_factor(rating_a)
+            b_k = get_k_factor(rating_b, goals)
+    elif k_factor_type == 'fixed':
+        a_k = k_factor
+        b_k = k_factor
 
     new_rating_a = rating_a + a_k * (score_a - e_a)
     score_b = 1 - score_a
     new_rating_b = rating_b + b_k * (score_b - e_b)
+    
     return new_rating_a, new_rating_b
 
 def calculate_new_elos_hpp(rating_a, rating_b, score_a, goals, u_ab, u_ba, m, alpha, beta):
@@ -198,37 +191,42 @@ def calculate_new_elos_hpp(rating_a, rating_b, score_a, goals, u_ab, u_ba, m, al
     """
     e_a = expected_score_hpp(rating_a, rating_b, u_ab, u_ba, alpha, beta, m)
     e_b = 1 - e_a
-    
-    if goals > 0:
-        a_k = get_k_factor(rating_a, goals)
-        b_k = get_k_factor(rating_b)
-    else:
-        a_k = get_k_factor(rating_a)
-        b_k = get_k_factor(rating_b, goals)
+    if k_factor_type == 'goals':
+        if goals > 0:
+            a_k = get_k_factor(rating_a, goals)
+            b_k = get_k_factor(rating_b)
+        else:
+            a_k = get_k_factor(rating_a)
+            b_k = get_k_factor(rating_b, goals)
+    elif k_factor_type == 'fixed':
+        a_k = k_factor
+        b_k = k_factor
         
     new_rating_a = rating_a + a_k * (score_a - e_a)
     score_b = 1 - score_a
     new_rating_b = rating_b + b_k * (score_b - e_b)
+    
     return new_rating_a, new_rating_b
 
 def update_end_of_season(elos):
     """Regression towards the mean
-    
     Following 538 nfl methods
     https://fivethirtyeight.com/datalab/nfl-elo-ratings-are-back/
     """
-    #elos *= .75
-    #elos += (.25*1505)
     diff_from_mean = elos - mean_elo
     elos -= diff_from_mean/3
+    
     return elos
 
 def train(alpha_beta, ginf, n_teams, elo_type):
+    if elo_type == 'std':
+        alpha = alpha_beta
+
     elo_per_season = {}
     current_elos   = np.ones(shape=(n_teams)) * mean_elo
 
-    y_true = np.empty(1, dtype=object)
-    y_predicted = np.empty(1, dtype=object)
+    y_true = list()
+    y_predicted = list()
     
     for year in range(train_start_year, end_year + 1):
         games = ginf[ginf['season']==year]
@@ -236,25 +234,20 @@ def train(alpha_beta, ginf, n_teams, elo_type):
         for idx, game in games.iterrows():
             (ht_id, at_id, score) = getWinner(game)
             # get u_ha, u_ah
-            m, u_ha, u_ah = get_matches_and_upsets(ginf, ht_id, at_id, game['date']) #datetime.strptime(game['date'], '%Y-%m-%d').date())
+            m, u_ha, u_ah = get_matches_and_upsets(ginf, ht_id, at_id, game['date'])
             #update elo score
             ht_elo_before = current_elos[ht_id]
             at_elo_before = current_elos[at_id]
             
             y_true = np.append(y_true, game.result)
-            # y_true.append(game.result)
             
             if elo_type == 'std':
-                ht_elo_after, at_elo_after = calculate_new_elos(ht_elo_before, at_elo_before, score, game['fthg']-game['ftag'], alpha_beta[0])
-                y_predicted = np.append(y_predicted, expected_score(ht_elo_before, at_elo_before, alpha_beta[0]))
-                # y_predicted.append(expected_score(ht_elo_before, at_elo_before, beta))
+                ht_elo_after, at_elo_after = calculate_new_elos(ht_elo_before, at_elo_before, score, game['fthg']-game['ftag'], alpha)
+                y_predicted.append(expected_score(ht_elo_before, at_elo_before, alpha))
             elif elo_type == 'hpp':
                 ht_elo_after, at_elo_after = calculate_new_elos_hpp(ht_elo_before, at_elo_before, score, game['fthg']-game['ftag'], u_ha, u_ah, m, alpha_beta[0], alpha_beta[1])
-                y_predicted = np.append(y_predicted, expected_score_hpp(ht_elo_before, at_elo_before, u_ha, u_ah, alpha_beta[0], alpha_beta[1], m))
-                # y_predicted.append(expected_score_hpp(ht_elo_before, at_elo_before, u_ha, u_ah, beta, m))
-            else:
-                sys.exit('ERROR: elo_type must be set to std or hpp')
-                
+                y_predicted.append(expected_score_hpp(ht_elo_before, at_elo_before, u_ha, u_ah, alpha_beta[0], alpha_beta[1], m))
+
             # Save updated elos
             ginf.at[idx, 'ht_elo_before_game'] = ht_elo_before
             ginf.at[idx, 'at_elo_before_game'] = at_elo_before
@@ -269,39 +262,48 @@ def train(alpha_beta, ginf, n_teams, elo_type):
         
         if regress_towards_mean == 'Y':
             current_elos = update_end_of_season(current_elos)
-    #ginf.head()
+
     if optimize == 'Y':
-        return log_loss(y_true[1:].tolist(), y_predicted[1:].tolist())
+        return log_loss(y_true, y_predicted)
 
 def predict(ginf, predict_start_year, end_year, alpha, beta):
     #n_samples = 8000
     ginf_pred = ginf[(ginf.season >= predict_start_year) & (ginf.season <= end_year)]#.sample(n_samples)
-    
-    #y_true    = []
-    #y_predicted = []
-    y_true = np.empty(1, dtype=object)
-    y_predicted = np.empty(1, dtype=object)
+
+    y_true = list()
+    y_pred = list()
+    y_pred_disc = list()
 
     for row in ginf_pred.itertuples():
         ht_elo      = row.ht_elo_before_game
         at_elo      = row.at_elo_before_game
+
         if elo_type == 'std':
             w_expected = expected_score(ht_elo, at_elo, alpha)
         elif elo_type == 'hpp':
             w_expected = expected_score_hpp(ht_elo, at_elo, row.uw_ht, row.uw_at, alpha, beta, row.m_ha)
+                
+        y_true.append(row.result if row.result != 0.5 else 2)
         
-        y_true = np.append(y_true, row.result)
-        y_predicted = np.append(y_predicted, w_expected)
-        #y_true.append(row.result)
-        #y_predicted.append(w_expected)
-    
-    loss = log_loss(y_true[1:].tolist(), y_predicted[1:].tolist())
-    y_predicted_binary = [1 if y > 0.5 else 0 for y in y_predicted[1:].tolist()]
-    conf_matrix = pd.DataFrame(confusion_matrix(y_true[1:].tolist(), y_predicted_binary))
-    
-    return loss, conf_matrix, y_predicted, y_predicted_binary, y_true
+        if class_to_combine_draws_with != 'N':
+            y_pred.append(w_expected)
+            y_pred_disc.append(1 if w_expected > 0.5 else 0)
+        elif class_to_combine_draws_with == 'N':
+            if drop_draws == 'N':
+                y_pred.append([w_expected,1-w_expected])
+                y_pred_disc.append(1 if w_expected >= 0.66 else 2 if (w_expected >= 0.33 and w_expected < 0.66) else 0)
+            elif drop_draws == 'Y':
+                y_pred.append(w_expected)
+                y_pred_disc.append(1 if w_expected > 0.5 else 0)
 
-def import_preprocess_data(file_name):
+    y_true = [int(y) for y in y_true]
+    loss = log_loss(y_true, y_pred)
+    
+    conf_matrix = pd.DataFrame(confusion_matrix(y_true, y_pred_disc))
+    
+    return conf_matrix, y_pred, y_pred_disc, y_true
+
+def import_preprocess_data(file_name, drop_draws):
     """
     Imports ginf.csv, creates winner and upset results
     """
@@ -310,6 +312,10 @@ def import_preprocess_data(file_name):
     ginf = ginf.apply(defineWinner, axis=1)
     ginf = ginf.apply(defineUpset, axis=1)
     
+    if drop_draws == 'Y':
+        ginf = ginf[ginf['result'] != 0.5]
+        ginf = ginf.reset_index(drop=True)
+
     le = LabelEncoder()
     le.fit(np.unique(np.concatenate((ginf['ht'].tolist(), ginf['at'].tolist()), axis=0)))
     
@@ -340,46 +346,62 @@ def import_preprocess_data(file_name):
     return ginf, n_teams
 
 def main():
-    
-    ginf, n_teams = import_preprocess_data('ginf.csv')
+    ginf, n_teams = import_preprocess_data('ginf.csv', drop_draws)
     
     if optimize == 'Y':
-        initial_guess = [init_alpha, init_beta]
-        print("Optimizing...")
-        res = minimize(train, x0=initial_guess, method = 'Nelder-Mead', args=(ginf,n_teams,elo_type))
-        print(res)
-        optimal_alpha = res.x[0]
-        optimal_beta = res.x[1]
-        print("Predicting...")
-        loss, conf_matrix, y_predicted, y_predicted_binary, y_true = predict(ginf, predict_start_year, end_year, optimal_alpha, optimal_beta)
+        if elo_type == 'hpp':
+            initial_guess = [init_alpha, init_beta]
+            
+            print("Optimizing...")
+            res = minimize(train, x0=initial_guess, method = 'Nelder-Mead', args=(ginf,n_teams,elo_type))
+            print(res)
+            optimal_alpha = res.x[0]
+            optimal_beta = res.x[1]
+            
+            print("Predicting...")
+            conf_matrix, y_pred, y_pred_disc, y_true = predict(ginf, predict_start_year, end_year, optimal_alpha, optimal_beta)
+        
+        elif elo_type == 'std':
+            print("Optimizing...")
+            res = minimize(train, x0=init_alpha, method = 'Nelder-Mead', args=(ginf,n_teams,elo_type))
+            print(res)
+            optimal_alpha = res.x[0]
+            
+            beta = 0
+            print("Predicting...")
+            conf_matrix, y_pred, y_pred_disc, y_true = predict(ginf, predict_start_year, end_year, optimal_alpha, beta)
+    
     elif optimize == 'N':
         print("Training...")
         if elo_type == 'hpp':
             train([init_alpha, init_beta], ginf, n_teams, elo_type)
+            
             print("Predicting...")
-            loss, conf_matrix, y_predicted, y_predicted_binary, y_true = predict(ginf, predict_start_year, end_year, init_alpha, init_beta)
+            conf_matrix, y_pred, y_pred_disc, y_true = predict(ginf, predict_start_year, end_year, init_alpha, init_beta)
+        
         elif elo_type == 'std':
-            train([init_alpha, 0], ginf, n_teams, elo_type)
+            train(init_alpha, ginf, n_teams, elo_type)
+            
             print("Predicting...")
-            loss, conf_matrix, y_predicted, y_predicted_binary, y_true = predict(ginf, predict_start_year, end_year, init_alpha, 0)
-    else:
-        sys.exit("ERROR: optimize must be set to Y or N")
+            conf_matrix, y_pred, y_pred_disc, y_true = predict(ginf, predict_start_year, end_year, init_alpha, 0)
 
-    #for a in range(0, 1000, 10):
-    #    log_loss = predict(a, ginf, n_teams)
-    #    print(log_loss, a)
-    
     #for year in range(start_year, end_year + 1):
     #    s = elo_per_season[year]
     #    print(year, "mean:", s.mean() , "min:", s.min(), "max:", s.max())
     
-    print(y_predicted[1:10]) # print first results just to check
+    # print(y_predicted[1:10])
     print("Confusion matrix: ")
     print(conf_matrix)
     if class_to_combine_draws_with == 'A':
-        print(classification_report(y_true[1:].tolist(), y_predicted_binary, target_names=['away win/draw', 'home win'], zero_division=0))
+        print(classification_report(y_true, y_pred_disc, target_names=['away win/draw', 'home win'], zero_division=0))
     elif class_to_combine_draws_with == 'H':
-        print(classification_report(y_true[1:].tolist(), y_predicted_binary, target_names=['away win', 'home win/draw'], zero_division=0))
+        print(classification_report(y_true, y_pred_disc, target_names=['away win', 'home win/draw'], zero_division=0))
+    elif class_to_combine_draws_with == 'N':
+        if drop_draws == 'N':
+            print(classification_report(y_true, y_pred_disc, target_names=['away win', 'home win', 'draw'], zero_division=0))
+        elif drop_draws == 'Y':
+            print(classification_report(y_true, y_pred_disc, target_names=['away win', 'home win'], zero_division=0))
+    
     #sns.distplot(y_predicted, kde=False, bins=20)
     #plt.xlabel('Elo Expected Wins for Actual Winner')
     #plt.ylabel('Counts')
