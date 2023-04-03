@@ -16,30 +16,42 @@ import seaborn as sns  # more plotting
 from sklearn.metrics import confusion_matrix
 from sklearn.metrics import classification_report
 from sklearn.metrics import log_loss
-from sklearn import preprocessing
 from scipy.optimize import minimize
-import sys
 
 mean_elo = 1500
 elo_width = 400
-k_factor = 32
 train_start_year = 2012
 predict_start_year = 2013
 end_year = 2017
 elo_type = 'std' # standard elo 'std' or the proposed historical pairwise performance Elo method 'hpp'
 optimize = 'Y' # 'Y' or 'N' - whether or not to optimize the alpha and/or beta model parameters based on log loss using scipy minimize
-class_to_combine_draws_with = 'N' # or 'H' or 'N' ('N' means don't combine with draws - i.e., have three class problem - it is not currently finished)
-drop_draws = 'Y'
+class_to_combine_draws_with = 'A' # or 'A' or 'N' ('N' means don't combine with draws - i.e., have three class problem - it is not currently finished)
+drop_draws = 'N'
 init_beta = 0 # will always be zero if elo_type is std
-init_alpha = 100
-regress_towards_mean = 'N' # or 'N'
-k_factor_type = 'fixed' # fixed as per the k_factor value set above, or goals-based k-factor, which multiplies K by G (see 'Number of goals - Obtaining the G value' https://footballdatabase.com/methodology.php)
+init_alpha = 100 # initial value for home advantage (world elo ratings system standard is 100)
+init_lam = 1 # exponent in the hvattum goals-based method
+regress_towards_mean = 'Y' # or 'N'
+k_factor_type = 'goals' # fixed, goals (world elo ratings goals-based method), or hvattum (hvattum & arntzen's 2010 goals-based method)
+league_country = 'france' # england, germany, spain, italy, or france
 
-#import argparse
+k_factor = 32
+# if league_country == 'france':
+#     k_factor = 25
+# else:
+#     k_factor = 32
 
-#parser = argparse.ArgumentParser()
-#parser.add_argument('-m', '--mean_elo', type=int, required=False, default=1500, help='Mean (starting) Elo rating. Default = 1500.')
-#args, _ = parser.parse_known_args()
+# import argparse
+
+# parser = argparse.ArgumentParser()
+# parser.add_argument('--mean_elo', type=int, required=False, default=1500, help='Mean (starting) Elo rating. Default = 1500.')
+# parser.add_argument('--elo_width', type=int, required=False, default=400, help='Width of Elo. Default = 400.')
+# parser.add_argument('--train_start_year', type=int, required=False, default=2012, help='Start year for training. Default = 2012')
+# parser.add_argument('--predict_start_year', type=int, required=False, default=2013, help='Start year for prediction. Default = 2013')
+# parser.add_argument('--end_year', type=int, required=False, default=2017, help='End year. Default = 2017')
+# parser.add_argument('--elo_type', type=str, required=False, default='std', help='standard elo, std, or the proposed historical pairwise performance Elo method, hpp')
+# parser.add_argument('--optimize', type=str, required=False, default='N', help='Whether to optimize beta and or alpha. Default = N')
+# parser.add_argument('--combine_draws_with', type=str, required=False, default='N', help='Whether to optimize beta and or alpha. Default = N')
+# args, _ = parser.parse_known_args()
 
 def defineWinner(row):
     if class_to_combine_draws_with == 'A':
@@ -49,6 +61,7 @@ def defineWinner(row):
             row['result'] = 0  # 'Away win or draw'
         else:
             row['result'] = None
+    
     elif class_to_combine_draws_with == 'H':
         if row['fthg'] >= row['ftag']:
             row['result'] = 1  # 'Home win or draw'
@@ -56,6 +69,7 @@ def defineWinner(row):
             row['result'] = 0  # 'Away win'
         else:
             row['result'] = None
+    
     elif class_to_combine_draws_with == 'N':
         if row['fthg'] > row['ftag']:
             row['result'] = 1 # 'Home team win'
@@ -76,6 +90,7 @@ def defineUpset(row):
         else:
             row['upset'] = 'N'
         return row
+    
     elif class_to_combine_draws_with == 'H':
         if 1 / row['odd_h'] > 1 / row['odd_a'] and row['fthg'] < row['ftag']:
             row['upset'] = 'UL'
@@ -84,6 +99,7 @@ def defineUpset(row):
         else:
             row['upset'] = 'N'
         return row
+    
     elif class_to_combine_draws_with == 'N':
         if 1 / row['odd_h'] > 1 / row['odd_a'] and row['fthg'] < row['ftag']:
             row['upset'] = 'UL'
@@ -99,11 +115,13 @@ def getWinner(row):
             return (row['ht'], row['at'], 1)
         elif row['ftag'] >= row['fthg']: #Away Win or Draw
             return (row['ht'], row['at'], 0)
+    
     elif class_to_combine_draws_with == 'H':
         if row['fthg'] >= row['ftag']: #Home Win or Draw
             return (row['ht'], row['at'], 1)
         elif row['ftag'] > row['fthg']: #Away Win
             return (row['ht'], row['at'], 0)
+    
     elif class_to_combine_draws_with == 'N':
         if row['fthg'] > row['ftag']: #Home Win
             return (row['ht'], row['at'], 1)
@@ -140,7 +158,7 @@ def expected_score(rating_a, rating_b, alpha):
 
 def expected_score_hpp(rating_a, rating_b, u_ab, u_ba, alpha, beta, matches_ab):
     """Returns the expected score for a game between the specified teams, incorporating the historical unexpected results between them
-    """
+    """    
     if matches_ab == 0:
         W_e = 1.0/(1+10**((rating_b - rating_a - alpha)/elo_width))
     else:
@@ -175,9 +193,14 @@ def calculate_new_elos(rating_a, rating_b, score_a, goals, alpha):
         else:
             a_k = get_k_factor(rating_a)
             b_k = get_k_factor(rating_b, goals)
+    
     elif k_factor_type == 'fixed':
         a_k = k_factor
         b_k = k_factor
+    
+    elif k_factor_type == 'hvattum':
+        a_k = k_factor*(1 + goals)**init_lam
+        b_k = k_factor*(1 + goals)**init_lam
 
     new_rating_a = rating_a + a_k * (score_a - e_a)
     score_b = 1 - score_a
@@ -198,10 +221,15 @@ def calculate_new_elos_hpp(rating_a, rating_b, score_a, goals, u_ab, u_ba, m, al
         else:
             a_k = get_k_factor(rating_a)
             b_k = get_k_factor(rating_b, goals)
+    
     elif k_factor_type == 'fixed':
         a_k = k_factor
         b_k = k_factor
-        
+    
+    elif k_factor_type == 'hvattum':
+        a_k = k_factor*(1 + goals)**init_lam
+        b_k = k_factor*(1 + goals)**init_lam
+
     new_rating_a = rating_a + a_k * (score_a - e_a)
     score_b = 1 - score_a
     new_rating_b = rating_b + b_k * (score_b - e_b)
@@ -244,6 +272,7 @@ def train(alpha_beta, ginf, n_teams, elo_type):
             if elo_type == 'std':
                 ht_elo_after, at_elo_after = calculate_new_elos(ht_elo_before, at_elo_before, score, game['fthg']-game['ftag'], alpha)
                 y_predicted.append(expected_score(ht_elo_before, at_elo_before, alpha))
+            
             elif elo_type == 'hpp':
                 ht_elo_after, at_elo_after = calculate_new_elos_hpp(ht_elo_before, at_elo_before, score, game['fthg']-game['ftag'], u_ha, u_ah, m, alpha_beta[0], alpha_beta[1])
                 y_predicted.append(expected_score_hpp(ht_elo_before, at_elo_before, u_ha, u_ah, alpha_beta[0], alpha_beta[1], m))
@@ -288,6 +317,7 @@ def predict(ginf, predict_start_year, end_year, alpha, beta):
         if class_to_combine_draws_with != 'N':
             y_pred.append(w_expected)
             y_pred_disc.append(1 if w_expected > 0.5 else 0)
+        
         elif class_to_combine_draws_with == 'N':
             if drop_draws == 'N':
                 y_pred.append([w_expected,1-w_expected])
@@ -303,7 +333,7 @@ def predict(ginf, predict_start_year, end_year, alpha, beta):
     
     return conf_matrix, y_pred, y_pred_disc, y_true
 
-def import_preprocess_data(file_name, drop_draws):
+def import_preprocess_data(file_name, drop_draws, league_country):
     """
     Imports ginf.csv, creates winner and upset results
     """
@@ -314,6 +344,10 @@ def import_preprocess_data(file_name, drop_draws):
     
     if drop_draws == 'Y':
         ginf = ginf[ginf['result'] != 0.5]
+        ginf = ginf.reset_index(drop=True)
+
+    if league_country != 'all':
+        ginf = ginf[ginf['country'] == league_country]
         ginf = ginf.reset_index(drop=True)
 
     le = LabelEncoder()
@@ -346,7 +380,7 @@ def import_preprocess_data(file_name, drop_draws):
     return ginf, n_teams
 
 def main():
-    ginf, n_teams = import_preprocess_data('ginf.csv', drop_draws)
+    ginf, n_teams = import_preprocess_data('ginf.csv', drop_draws, league_country)
     
     if optimize == 'Y':
         if elo_type == 'hpp':
@@ -385,44 +419,19 @@ def main():
             print("Predicting...")
             conf_matrix, y_pred, y_pred_disc, y_true = predict(ginf, predict_start_year, end_year, init_alpha, 0)
 
-    #for year in range(start_year, end_year + 1):
-    #    s = elo_per_season[year]
-    #    print(year, "mean:", s.mean() , "min:", s.min(), "max:", s.max())
-    
-    # print(y_predicted[1:10])
     print("Confusion matrix: ")
     print(conf_matrix)
     if class_to_combine_draws_with == 'A':
         print(classification_report(y_true, y_pred_disc, target_names=['away win/draw', 'home win'], zero_division=0))
+    
     elif class_to_combine_draws_with == 'H':
         print(classification_report(y_true, y_pred_disc, target_names=['away win', 'home win/draw'], zero_division=0))
+    
     elif class_to_combine_draws_with == 'N':
         if drop_draws == 'N':
             print(classification_report(y_true, y_pred_disc, target_names=['away win', 'home win', 'draw'], zero_division=0))
         elif drop_draws == 'Y':
             print(classification_report(y_true, y_pred_disc, target_names=['away win', 'home win'], zero_division=0))
-    
-    #sns.distplot(y_predicted, kde=False, bins=20)
-    #plt.xlabel('Elo Expected Wins for Actual Winner')
-    #plt.ylabel('Counts')
-    #plt.show()
         
-    #team_name = 'Arsenal'
-    #team_id = le.transform([team_name])[0]
-    
-    #x = []
-    #y = range(start_year, end_year)
-    
-    #for i in range(start_year, end_year):
-    #   x.append(elo_per_season[i][team_id])
-    
-    #y_pos = np.arange(len(y)) 
-    #plt.bar(y_pos, x, align='center', beta=0.5)
-    #plt.xticks(y_pos, y)
-    #plt.title(team_name + ': Elo ratings over time')
-    #plt.xlabel('Year')
-    #plt.ylabel('Elo rating over time')
-    #plt.show()
-    
 if __name__ == "__main__":
         main()

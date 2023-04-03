@@ -11,85 +11,129 @@ import pandas as pd # data processing, CSV file I/O (e.g. pd.read_csv)
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import confusion_matrix
+from sklearn.metrics import classification_report
+from sklearn.metrics import log_loss
+import sys
+from scipy.optimize import minimize
+import os
 
 mean_elo = 1500
 elo_width = 400
 k_factor = 32
-init_alpha = 100
+init_alpha = 100 # home advantage
 init_beta = 100
-elo_type = 'std' # or 'hpp'
-optimize = 'N' # or 'Y'
-regress_towards_mean = 'Y'
-eval_start_year = 2010
+elo_type = 'std' # 'std' or 'hpp'
+optimize = 'N' # 'Y' or 'N'
+regress_towards_mean = 'Y' # 'Y' or 'N'
+train_start_year = 1985
+predict_start_year = 1986
+end_year = 1987
 
-data_dir = '/Users/rorybunker/Google Drive/Research/Elo ratings with historical pairwise performance/NCAA_Data'
+data_dir = os.getcwd() + '../NCAA_Data'
 
-df_reg = pd.read_csv(data_dir + '/' + 'RegularSeasonCompactResults.csv')
-df_tour = pd.read_csv(data_dir + '/' + 'TourneyCompactResults.csv')
-df_seeds = pd.read_csv(data_dir + '/' + 'TourneySeeds.csv')
+df_reg = pd.read_csv(data_dir + '/RegularSeasonCompactResults.csv')
+df_tour = pd.read_csv(data_dir + '/TourneyCompactResults.csv')
+df_seeds = pd.read_csv(data_dir + '/TourneySeeds.csv')
 
 # - Concatenate both regular season and tournament results into one DataFrame.
 # - Drop the columns we don't need. 
 # - Sort chronologically, ie by season, then by date in that season
 
 df_concat = pd.concat((df_reg, df_tour), ignore_index=True)
-df_concat.drop(labels=[ 'Wscore', 'Lscore', 'Wloc', 'Numot'], inplace=True, axis=1)
+df_concat.drop(labels=['Numot'], inplace=True, axis=1)
 df_concat.sort_values(by=['Season', 'Daynum'], inplace=True)
 
+# create new DataFrame with restructured format
+new_df = pd.DataFrame(columns=['Season', 'Daynum', 'HT', 'AT', 'HTscore', 'ATscore', 'Winner'])
+
+for index, row in df_concat.iterrows():
+    if row['Wloc'] == 'H':
+        new_row = {'Season': row['Season'], 'Daynum': row['Daynum'], 'HT': row['Wteam'], 
+                   'AT': row['Lteam'], 'HTscore': row['Wscore'], 'ATscore': row['Lscore'], 
+                   'Winner': row['Wteam']}
+    elif row['Wloc'] == 'A':
+        new_row = {'Season': row['Season'], 'Daynum': row['Daynum'], 'HT': row['Lteam'], 
+                   'AT': row['Wteam'], 'HTscore': row['Lscore'], 'ATscore': row['Wscore'], 
+                   'Winner': row['Wteam']}
+    else:
+        new_row = {'Season': row['Season'], 'Daynum': row['Daynum'], 'HT': row['Wteam'], 
+                  'AT': row['Lteam'], 'HTscore': row['Wscore'], 'ATscore': row['Lscore'], 
+                   'Winner': None}
+    
+    new_df = pd.concat([new_df, pd.DataFrame(new_row, index=[0])], ignore_index=True)
+
 # left join to bring in seeds
-df_concat = pd.merge(df_concat, df_seeds, how='left', left_on=['Season', 'Wteam'], right_on=['Season', 'Team'])
+new_df = new_df[new_df['Winner'] > 0]
+df_concat = pd.merge(new_df, df_seeds, how='left', left_on=['Season', 'HT'], right_on=['Season', 'Team'])
 df_concat.drop(labels='Team', inplace=True, axis=1)
-df_concat = df_concat.rename(columns={"Seed": "WteamSeed"})
-df_concat = pd.merge(df_concat, df_seeds, how='left', left_on=['Season', 'Lteam'], right_on=['Season', 'Team'])
+df_concat = df_concat.rename(columns={"Seed": "HT_Seed"})
+df_concat = pd.merge(df_concat, df_seeds, how='left', left_on=['Season', 'AT'], right_on=['Season', 'Team'])
 df_concat.drop(labels='Team', inplace=True, axis=1)
-df_concat = df_concat.rename(columns={"Seed": "LteamSeed"})
+df_concat = df_concat.rename(columns={"Seed": "AT_Seed"})
 
 # extract seed - the last part of the string, and convert to int
-df_concat['WteamSeed'] = (df_concat['WteamSeed'].str[1:3]).astype('Int64')
-df_concat['LteamSeed'] = (df_concat['LteamSeed'].str[1:3]).astype('Int64')
+df_concat['HT_Seed'] = (df_concat['HT_Seed'].str[1:3]).astype('Int64')
+df_concat['AT_Seed'] = (df_concat['AT_Seed'].str[1:3]).astype('Int64')
 
 # replace null seed values with 100 (to represent unseeded)
-df_concat["WteamSeed"].fillna(100, inplace = True)
-df_concat["LteamSeed"].fillna(100, inplace = True)
+df_concat["HT_Seed"].fillna(100, inplace = True)
+df_concat["AT_Seed"].fillna(100, inplace = True)
 
 # Transform team IDs to be from 0 to number_of_teams-1.
 # We do this so that we can use team ID as an index for lookups later.
-
 le = LabelEncoder()
-df_concat.Wteam = le.fit_transform(df_concat.Wteam)
-df_concat.Lteam = le.fit_transform(df_concat.Lteam)
+df_concat.HT = le.fit_transform(df_concat.HT)
+df_concat.AT = le.fit_transform(df_concat.AT)
 
 # ## Elo stuff preparation ##
 # Define the functions we need to calculate the probability of winning given two Elo ratings,
 # and also the change in Elo rating after a game is played.
 
-def defineUpset(row):
-    if row['WteamSeed'] < row['LteamSeed']:
-        row['upset'] = 'UL'
-    elif row['WteamSeed'] > row['LteamSeed']:
-        row['upset'] = 'UW'
+def defineWinner(row):
+    if row['HTscore'] > row['ATscore']:
+        row['result'] = 1 # 'Home team win'
+    elif row['ATscore'] > row['HTscore']:
+        row['result'] = 0  # 'Away team win'
+    elif row['HTscore'] == row['ATscore']:
+        row['result'] = 0.5  # 'Draw'
     else:
-        row['upset'] = 'N'
+        row['result'] = None
     return row
 
-def get_matches_and_upsets(df_concat, w_team_id, l_team_id, date_minus_one):
-    """Obtains the number of matches and upset wins for a specific home team and away team prior to a specified date"""
+def defineUpset(row):
+    # If HT_Seed > AT_Seed => AT is favourite, AT_Seed > HT_Seed => HT is favourite
+    if row['HT_Seed'] > row['AT_Seed'] and row['HTscore'] > row['ATscore']:
+        row['upset'] = 'UW_HT'
+    elif row['AT_Seed'] > row['HT_Seed'] and row['ATscore'] > row['HTscore']:
+        row['upset'] = 'UW_AT'
+    else:
+        row['upset'] = 'NU'
+    return row
 
-    w_team = w_team_id
-    l_team = l_team_id
+def getWinner(row):
+    if row['HTscore'] > row['ATscore']: #Home Win
+        return (row['HT'], row['AT'], 1)
+    elif row['ATscore'] > row['HTscore']: #Away Win
+        return (row['HT'], row['AT'], 0)
+        
+def get_matches_and_upsets(df, home_team_id, away_team_id, date_minus_one):
+    """Obtains the number of matches and upset wins for a specific home team and away team prior to a specified date
+    """
+    home_team = home_team_id
+    away_team = away_team_id
     
-    df_wt_lt = df_concat[(((df_concat["Wteam"] == w_team) & (df_concat["Lteam"] == l_team)) | (
-                (df_concat["Wteam"] == l_team) & (df_concat["Lteam"] == w_team))) & (df_concat["date"] < date_minus_one)]
+    df_ht_at = df[(((df["HT"] == home_team) & (df["AT"] == away_team)) | (
+                (df["HT"] == away_team) & (df["AT"] == home_team))) & (df["date"] < date_minus_one)]
     
-    df_upset_w_wt = df_wt_lt[(df_wt_lt["upset"] == "UW")]
-    df_upset_w_lt = df_wt_lt[(df_wt_lt["upset"] == "UL")]
+    df_upset_w_ht = df_ht_at[(df_ht_at["upset"] == "UW")]
+    df_upset_w_at = df_ht_at[(df_ht_at["upset"] == "UL")]
     
-    m_wl = len(df_wt_lt)
-    u_wt = len(df_upset_w_wt)
-    u_lt = len(df_upset_w_lt)
+    m_ha = len(df_ht_at)
+    u_ht = len(df_upset_w_ht)
+    u_at = len(df_upset_w_at)
 
-    # return combinations_new_df
-    return m_wl, u_wt, u_lt
+    return m_ha, u_ht, u_at
 
 def update_elo(winner_elo, loser_elo):
     """
@@ -108,13 +152,13 @@ def expected_result(elo_a, elo_b):
     expect_a = 1.0/(1+10**((elo_b - elo_a)/elo_width))
     return expect_a
 
-def expected_result_hpp(elo_a, elo_b, u_ab, u_ba, alpha, beta, matches_ab):
+def expected_result_hpp(elo_a, elo_b, u_ab, u_ba, beta, matches_ab):
     """Returns the expected score for a game between the specified teams, incorporating the historical unexpected results between them
     """
     if matches_ab == 0:
-        expect_a = 1.0/(1+10**((elo_b - elo_a - alpha)/elo_width))
+        expect_a = 1.0/(1+10**((elo_b - elo_a)/elo_width))
     else:
-        expect_a = 1.0/(1+10**((elo_b - elo_a - alpha + ((beta/matches_ab)*(u_ba - u_ab)))/elo_width))
+        expect_a = 1.0/(1+10**((elo_b - elo_a + ((beta/matches_ab)*(u_ba - u_ab)))/elo_width))
     
     return expect_a
     
@@ -128,6 +172,57 @@ def update_end_of_season(elos):
     elos -= diff_from_mean/3
     return elos
 
+def expected_score(rating_a, rating_b, alpha):
+    """Returns the expected score for a game between the specified teams
+    http://footballdatabase.com/methodology.php
+    """
+    W_e = 1.0/(1+10**((rating_b - rating_a - alpha)/elo_width))
+    
+    return W_e
+
+def expected_score_hpp(rating_a, rating_b, u_ab, u_ba, alpha, beta, matches_ab):
+    """Returns the expected score for a game between the specified teams, incorporating the historical unexpected results between them
+    """    
+    if matches_ab == 0:
+        W_e = 1.0/(1+10**((rating_b - rating_a - alpha)/elo_width))
+    else:
+        W_e = 1.0/(1+10**((rating_b - rating_a - alpha + ((beta/matches_ab)*(u_ba - u_ab)))/elo_width))
+    
+    return W_e
+
+def calculate_new_elos(rating_a, rating_b, score_a, alpha):
+    """Calculates and returns the new Elo ratings for two players.
+    score_a is 1 for a win by player A, 0 for a loss by player A, or 0.5 for a draw.
+    """
+    e_a = expected_score(rating_a, rating_b, alpha)
+    e_b = 1 - e_a
+    
+    a_k = k_factor
+    b_k = k_factor
+
+    new_rating_a = rating_a + a_k * (score_a - e_a)
+    score_b = 1 - score_a
+    new_rating_b = rating_b + b_k * (score_b - e_b)
+    
+    return new_rating_a, new_rating_b
+
+def calculate_new_elos_hpp(rating_a, rating_b, score_a, u_ab, u_ba, m, alpha, beta):
+    """Calculates and returns the new Elo ratings for two teams.
+    score_a is 1 for a win by team A, 0 for a loss by team A, or 0.5 for a draw.
+    """
+    e_a = expected_score_hpp(rating_a, rating_b, u_ab, u_ba, alpha, beta, m)
+    e_b = 1 - e_a
+
+    a_k = k_factor
+    b_k = k_factor
+    
+    new_rating_a = rating_a + a_k * (score_a - e_a)
+    score_b = 1 - score_a
+    new_rating_b = rating_b + b_k * (score_b - e_b)
+    
+    return new_rating_a, new_rating_b
+
+df_concat = df_concat.apply(defineWinner, axis=1)
 df_concat = df_concat.apply(defineUpset, axis=1)
 
 df_concat['w_elo_before_game'] = 0
@@ -138,19 +233,19 @@ elo_per_season = {}
 n_teams = len(le.classes_)
 current_elos = np.ones(shape=(n_teams)) * mean_elo
 
-df_concat["m_ha"] = ''
-df_concat["uw_ht"] = ''
-df_concat["uw_at"] = ''
+df_concat["M_HA"] = ''
+df_concat["UW_HT"] = ''
+df_concat["UW_AT"] = ''
 df_concat["date"] = df_concat['Season'].astype(str) + df_concat['Daynum'].astype(str)
-    
+
 for i in range(len(df_concat)):
-    a = df_concat.loc[i, "Wteam"]
-    b = df_concat.loc[i, "Lteam"]
+    a = df_concat.loc[i, "HT"]
+    b = df_concat.loc[i, "AT"]
     c = df_concat.loc[i, "date"]
     ha, ht, at = get_matches_and_upsets(df_concat, a, b, c)
-    df_concat.loc[i, 'm_ha'] = ha
-    df_concat.loc[i, 'uw_ht'] = ht
-    df_concat.loc[i, 'uw_at'] = at
+    df_concat.loc[i, 'M_HA'] = ha
+    df_concat.loc[i, 'UW_HT'] = ht
+    df_concat.loc[i, 'UW_AT'] = at
     print(i + 1," / ",len(df_concat))
 
 # # Make a new column with a unique time
@@ -160,7 +255,7 @@ df_concat['total_days'] = (df_concat.Season-1970)*365.25 + df_concat.Daynum
 
 df_team_elos = pd.DataFrame(index=df_concat.total_days.unique(), 
                             columns=range(n_teams))
-df_team_elos.iloc[0, :] = current_elos
+df_team_elos.iloc[0,:] = current_elos
 
 # ## The loop where it happens ##
 # 
@@ -181,11 +276,12 @@ for row in df_concat.itertuples():
         elo_per_season[row.Season] = current_elos.copy()
         current_season = row.Season
     idx = row.Index
-    w_id = row.Wteam
-    l_id = row.Lteam
+    ht_id = row.HT
+    at_id = row.AT
+
     # Get current elos
-    w_elo_before = current_elos[w_id]
-    l_elo_before = current_elos[l_id]
+    w_elo_before = current_elos[ht_id]
+    l_elo_before = current_elos[at_id]
     # Update on game results
     w_elo_after, l_elo_after = update_elo(w_elo_before, l_elo_before)
         
@@ -194,52 +290,176 @@ for row in df_concat.itertuples():
     df_concat.at[idx, 'l_elo_before_game'] = l_elo_before
     df_concat.at[idx, 'w_elo_after_game'] = w_elo_after
     df_concat.at[idx, 'l_elo_after_game'] = l_elo_after
-    current_elos[w_id] = w_elo_after
-    current_elos[l_id] = l_elo_after
+    current_elos[ht_id] = w_elo_after
+    current_elos[at_id] = l_elo_after
     
     # Save elos to team DataFrame
     today = row.total_days
-    df_team_elos.at[today, w_id] = w_elo_after
-    df_team_elos.at[today, l_id] = l_elo_after
+    df_team_elos.at[today, ht_id] = w_elo_after
+    df_team_elos.at[today, at_id] = l_elo_after
 
+def train(alpha_beta, ginf, n_teams, elo_type):
+    if elo_type == 'std':
+        alpha = alpha_beta
+
+    elo_per_season = {}
+    current_elos   = np.ones(shape=(n_teams)) * mean_elo
+
+    y_true = list()
+    y_predicted = list()
+    
+    for year in range(train_start_year, end_year + 1):
+        games = ginf[ginf['Season']==year]
+        
+        for idx, game in games.iterrows():
+            (ht_id, at_id, score) = getWinner(game)
+            # get u_ha, u_ah
+            m, u_ha, u_ah = get_matches_and_upsets(ginf, ht_id, at_id, game['date'])
+            #update elo score
+            ht_elo_before = current_elos[ht_id]
+            at_elo_before = current_elos[at_id]
+
+            y_true = np.append(y_true, game.result)
+            
+            if elo_type == 'std':
+                ht_elo_after, at_elo_after = calculate_new_elos(ht_elo_before, at_elo_before, score, alpha)
+                y_predicted.append(expected_score(ht_elo_before, at_elo_before, alpha))
+            
+            elif elo_type == 'hpp':
+                ht_elo_after, at_elo_after = calculate_new_elos_hpp(ht_elo_before, at_elo_before, score, u_ha, u_ah, m, alpha_beta[0], alpha_beta[1])
+                y_predicted.append(expected_score_hpp(ht_elo_before, at_elo_before, u_ha, u_ah, alpha_beta[0], alpha_beta[1], m))
+
+            # Save updated elos
+            ginf.at[idx, 'ht_elo_before_game'] = ht_elo_before
+            ginf.at[idx, 'at_elo_before_game'] = at_elo_before
+            ginf.at[idx, 'ht_elo_after_game'] = ht_elo_after
+            ginf.at[idx, 'at_elo_after_game'] = at_elo_after
+            # print("Score: ", game.result, "Goals:", "Predicted:", expected_score(ht_elo_before, at_elo_before), expected_score(at_elo_before, ht_elo_before), game['HTscore']-game['ATscore'], "Home Before:", ht_elo_before, " and After:", ht_elo_after, "Away Before:", at_elo_before, " and After:", at_elo_after)
+            
+            current_elos[ht_id] = ht_elo_after
+            current_elos[at_id] = at_elo_after
+        
+        elo_per_season[year] = current_elos.copy()
+        
+        if regress_towards_mean == 'Y':
+            current_elos = update_end_of_season(current_elos)
+
+    if optimize == 'Y':
+        return log_loss(y_true, y_predicted)
 
 # ## Evaluation ##
 # Sample 10,000 games from recent seasons. 
 # Record the expected wins and use this to calculate the logloss.
 
-# n_samples = 10000
-df_concat_subset = df_concat[df_concat.Season > eval_start_year]#.sample(n_samples)
-loss=0
-expected_list = []
-for row in df_concat_subset.itertuples():
-    w_elo = row.w_elo_before_game
-    l_elo = row.l_elo_before_game
-    if elo_type == 'std':
-        w_expected = expected_result(w_elo, l_elo)
-        expected_list.append(w_expected)
-        loss += np.log(w_expected)
-    elif elo_type == 'hpp':
-        w_expected = expected_result_hpp(w_elo, l_elo, u_wl, u_lw, init_alpha, init_beta, )
-        expected_list.append(w_expected)
-        loss += np.log(w_expected)
-# print(loss/n_samples)
-print(loss)
+def predict(ginf, predict_start_year, end_year, alpha, beta):
+    #n_samples = 8000
+    ginf_pred = ginf[(ginf.Season >= predict_start_year) & (ginf.Season <= end_year)]#.sample(n_samples)
 
-sns.displot(expected_list, kde=False, bins=20)
-plt.xlabel('Elo Expected Wins for Actual Winner')
-plt.ylabel('Counts')
+    y_true = list()
+    y_pred = list()
+    y_pred_disc = list()
 
-# ## Look at Elo ratings over time ##
-# 
-# - Fill all the N/As with the previous Elo rating. 
-# - Rename the columns to a string
-# - Make a new column with the datetime of the game
+    for row in ginf_pred.itertuples():
+        
+        ht_elo      = row.ht_elo_before_game
+        at_elo      = row.at_elo_before_game
 
-df_team_elos.fillna(method='ffill', inplace=True)
-trans_dict = {i: 'team_{}'.format(i) for i in range(n_teams)}
-df_team_elos.rename(columns=trans_dict, inplace=True)
-epoch = (df_team_elos.index)
-df_team_elos['date'] = pd.to_datetime(epoch, unit='D')
+        if elo_type == 'std':
+            w_expected = expected_score(ht_elo, at_elo, alpha)
+        elif elo_type == 'hpp':
+            w_expected = expected_score_hpp(ht_elo, at_elo, row.uw_ht, row.uw_at, alpha, beta, row.m_ha)
+               
+        y_true.append(row.result if row.result != 0.5 else 2)
+        y_pred.append(w_expected)
+        y_pred_disc.append(1 if w_expected > 0.5 else 0)
 
-df_team_elos.plot(x='date', y=['team_1', 'team_2'])
-plt.ylabel('Elo rating')
+    y_true = [int(y) for y in y_true]
+
+    loss = log_loss(y_true, y_pred)
+    
+    conf_matrix = pd.DataFrame(confusion_matrix(y_true, y_pred_disc))
+    
+    return conf_matrix, y_pred, y_pred_disc, y_true
+
+ginf = df_concat
+if optimize == 'Y':
+    if elo_type == 'hpp':
+        initial_guess = [init_alpha, init_beta]
+        
+        print("Optimizing...")
+        res = minimize(train, x0=initial_guess, method = 'Nelder-Mead', args=(ginf,n_teams,elo_type))
+        print(res)
+        optimal_alpha = res.x[0]
+        optimal_beta = res.x[1]
+        
+        print("Predicting...")
+        conf_matrix, y_pred, y_pred_disc, y_true = predict(ginf, predict_start_year, end_year, optimal_alpha, optimal_beta)
+    
+    elif elo_type == 'std':
+        print("Optimizing...")
+        res = minimize(train, x0=init_alpha, method = 'Nelder-Mead', args=(ginf,n_teams,elo_type))
+        print(res)
+        optimal_alpha = res.x[0]
+        
+        beta = 0
+        print("Predicting...")
+        conf_matrix, y_pred, y_pred_disc, y_true = predict(ginf, predict_start_year, end_year, optimal_alpha, beta)
+
+elif optimize == 'N':
+    print("Training...")
+    if elo_type == 'hpp':
+        train([init_alpha, init_beta], ginf, n_teams, elo_type)
+        
+        print("Predicting...")
+        conf_matrix, y_pred, y_pred_disc, y_true = predict(ginf, predict_start_year, end_year, init_alpha, init_beta)
+    
+    elif elo_type == 'std':
+        train(init_alpha, ginf, n_teams, elo_type)
+        
+        print("Predicting...")
+        conf_matrix, y_pred, y_pred_disc, y_true = predict(ginf, predict_start_year, end_year, init_alpha, 0)
+
+print("Confusion matrix: ")
+print(conf_matrix)
+print(classification_report(y_true, y_pred_disc, target_names=['away win', 'home win'], zero_division=0))
+
+if optimize == 'Y':
+    if elo_type == 'hpp':
+        initial_guess = [init_alpha, init_beta]
+        
+        print("Optimizing...")
+        res = minimize(train, x0=initial_guess, method = 'Nelder-Mead', args=(ginf,n_teams,elo_type))
+        print(res)
+        optimal_alpha = res.x[0]
+        optimal_beta = res.x[1]
+        
+        print("Predicting...")
+        conf_matrix, y_pred, y_pred_disc, y_true = predict(ginf, predict_start_year, end_year, optimal_alpha, optimal_beta)
+    
+    elif elo_type == 'std':
+        print("Optimizing...")
+        res = minimize(train, x0=init_alpha, method = 'Nelder-Mead', args=(ginf,n_teams,elo_type))
+        print(res)
+        optimal_alpha = res.x[0]
+        
+        beta = 0
+        print("Predicting...")
+        conf_matrix, y_pred, y_pred_disc, y_true = predict(ginf, predict_start_year, end_year, optimal_alpha, beta)
+
+elif optimize == 'N':
+    print("Training...")
+    if elo_type == 'hpp':
+        train([init_alpha, init_beta], ginf, n_teams, elo_type)
+        
+        print("Predicting...")
+        conf_matrix, y_pred, y_pred_disc, y_true = predict(ginf, predict_start_year, end_year, init_alpha, init_beta)
+    
+    elif elo_type == 'std':
+        train(init_alpha, ginf, n_teams, elo_type)
+        
+        print("Predicting...")
+        conf_matrix, y_pred, y_pred_disc, y_true = predict(ginf, predict_start_year, end_year, init_alpha, 0)
+
+print("Confusion matrix: ")
+print(conf_matrix)
+print(classification_report(y_true, y_pred_disc, target_names=['away win', 'home win'], zero_division=0))
