@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Created on Wed Nov 16 14:52:29 2022
-
-@author: rorybunker
-"""
 
 import numpy as np # linear algebra
 import pandas as pd # data processing, CSV file I/O (e.g. pd.read_csv)
@@ -17,20 +12,23 @@ from sklearn.metrics import log_loss
 import sys
 from scipy.optimize import minimize
 import os
+import argparse
 
 mean_elo = 1500
 elo_width = 400
 k_factor = 32
 init_alpha = 100 # home advantage
 init_beta = 100
-elo_type = 'std' # 'std' or 'hpp'
-optimize = 'N' # 'Y' or 'N'
-regress_towards_mean = 'Y' # 'Y' or 'N'
-train_start_year = 1985
-predict_start_year = 1986
-end_year = 1987
 
-data_dir = os.getcwd() + '../NCAA_Data'
+parser = argparse.ArgumentParser()
+parser.add_argument('--train_start_year', type=int, required=False, default=1985, help='Start year for training. Default = 1985')
+parser.add_argument('--predict_start_year', type=int, required=False, default=1986, help='Start year for prediction. Default = 1986')
+parser.add_argument('--end_year', type=int, required=False, default=2017, help='End year. Default = 2017')
+parser.add_argument('--elo_type', type=str, required=False, default='std', help='standard elo, std, or the proposed historical pairwise performance Elo method, hpp')
+parser.add_argument('--optimize', type=str, required=False, default='N', help='Whether to optimize beta and or alpha. Default = N')
+parser.add_argument('--regress_towards_mean', type=str, required=False, default='Y', help='Whether to regress towards mean. Default = Y')
+args, _ = parser.parse_known_args()
+data_dir = os.getcwd() + '/NCAA_Data'
 
 df_reg = pd.read_csv(data_dir + '/RegularSeasonCompactResults.csv')
 df_tour = pd.read_csv(data_dir + '/TourneyCompactResults.csv')
@@ -73,8 +71,10 @@ df_concat.drop(labels='Team', inplace=True, axis=1)
 df_concat = df_concat.rename(columns={"Seed": "AT_Seed"})
 
 # extract seed - the last part of the string, and convert to int
-df_concat['HT_Seed'] = (df_concat['HT_Seed'].str[1:3]).astype('Int64')
-df_concat['AT_Seed'] = (df_concat['AT_Seed'].str[1:3]).astype('Int64')
+df_concat['HT_Seed'] = pd.to_numeric(df_concat['HT_Seed'], errors='coerce')
+df_concat['HT_Seed'] = df_concat['HT_Seed'].astype('Int64')
+df_concat['AT_Seed'] = pd.to_numeric(df_concat['AT_Seed'], errors='coerce')
+df_concat['AT_Seed'] = df_concat['AT_Seed'].astype('Int64')
 
 # replace null seed values with 100 (to represent unseeded)
 df_concat["HT_Seed"].fillna(100, inplace = True)
@@ -95,8 +95,6 @@ def defineWinner(row):
         row['result'] = 1 # 'Home team win'
     elif row['ATscore'] > row['HTscore']:
         row['result'] = 0  # 'Away team win'
-    elif row['HTscore'] == row['ATscore']:
-        row['result'] = 0.5  # 'Draw'
     else:
         row['result'] = None
     return row
@@ -257,20 +255,12 @@ df_team_elos = pd.DataFrame(index=df_concat.total_days.unique(),
                             columns=range(n_teams))
 df_team_elos.iloc[0,:] = current_elos
 
-# ## The loop where it happens ##
-# 
-# - We go through each row in the DataFrame. 
-# - We look up the current Elo rating of both teams. 
-# - We calculate the expected wins for the team that *actually won*. This is also what we use for *probability of winning*.
-# - Write Elo before and after the game in the Data Frame. 
-# - Update the Elo rating for both teams in the "current_elos" list.
-
 current_season = df_concat.at[0, 'Season']
 for row in df_concat.itertuples():
     if row.Season != current_season:
         # Check if we are starting a new season. 
         # Regress all ratings towards the mean
-        if regress_towards_mean == 'Y':
+        if args.regress_towards_mean == 'Y':
             current_elos = update_end_of_season(current_elos)
         # Write the beginning of new season ratings to a dict for later lookups.
         elo_per_season[row.Season] = current_elos.copy()
@@ -308,7 +298,7 @@ def train(alpha_beta, ginf, n_teams, elo_type):
     y_true = list()
     y_predicted = list()
     
-    for year in range(train_start_year, end_year + 1):
+    for year in range(args.train_start_year, args.end_year + 1):
         games = ginf[ginf['Season']==year]
         
         for idx, game in games.iterrows():
@@ -341,15 +331,13 @@ def train(alpha_beta, ginf, n_teams, elo_type):
         
         elo_per_season[year] = current_elos.copy()
         
-        if regress_towards_mean == 'Y':
+        if args.regress_towards_mean == 'Y':
             current_elos = update_end_of_season(current_elos)
 
-    if optimize == 'Y':
+    if args.optimize == 'Y':
         return log_loss(y_true, y_predicted)
 
 # ## Evaluation ##
-# Sample 10,000 games from recent seasons. 
-# Record the expected wins and use this to calculate the logloss.
 
 def predict(ginf, predict_start_year, end_year, alpha, beta):
     #n_samples = 8000
@@ -359,106 +347,60 @@ def predict(ginf, predict_start_year, end_year, alpha, beta):
     y_pred = list()
     y_pred_disc = list()
 
-    for row in ginf_pred.itertuples():
-        
+    for row in ginf_pred.itertuples():    
         ht_elo      = row.ht_elo_before_game
         at_elo      = row.at_elo_before_game
 
-        if elo_type == 'std':
+        if args.elo_type == 'std':
             w_expected = expected_score(ht_elo, at_elo, alpha)
-        elif elo_type == 'hpp':
-            w_expected = expected_score_hpp(ht_elo, at_elo, row.uw_ht, row.uw_at, alpha, beta, row.m_ha)
+        elif args.elo_type == 'hpp':
+            w_expected = expected_score_hpp(ht_elo, at_elo, row.UW_HT, row.UW_AT, alpha, beta, row.M_HA)
                
-        y_true.append(row.result if row.result != 0.5 else 2)
+        y_true.append(int(row.result))
         y_pred.append(w_expected)
         y_pred_disc.append(1 if w_expected > 0.5 else 0)
-
-    y_true = [int(y) for y in y_true]
-
-    loss = log_loss(y_true, y_pred)
     
     conf_matrix = pd.DataFrame(confusion_matrix(y_true, y_pred_disc))
     
     return conf_matrix, y_pred, y_pred_disc, y_true
 
 ginf = df_concat
-if optimize == 'Y':
-    if elo_type == 'hpp':
+if args.optimize == 'Y':
+    if args.elo_type == 'hpp':
         initial_guess = [init_alpha, init_beta]
         
         print("Optimizing...")
-        res = minimize(train, x0=initial_guess, method = 'Nelder-Mead', args=(ginf,n_teams,elo_type))
+        res = minimize(train, x0=initial_guess, method = 'Nelder-Mead', args=(ginf,n_teams,args.elo_type))
         print(res)
         optimal_alpha = res.x[0]
         optimal_beta = res.x[1]
         
         print("Predicting...")
-        conf_matrix, y_pred, y_pred_disc, y_true = predict(ginf, predict_start_year, end_year, optimal_alpha, optimal_beta)
+        conf_matrix, y_pred, y_pred_disc, y_true = predict(ginf, args.predict_start_year, args.end_year, optimal_alpha, optimal_beta)
     
-    elif elo_type == 'std':
+    elif args.elo_type == 'std':
         print("Optimizing...")
-        res = minimize(train, x0=init_alpha, method = 'Nelder-Mead', args=(ginf,n_teams,elo_type))
+        res = minimize(train, x0=init_alpha, method = 'Nelder-Mead', args=(ginf,n_teams,args.elo_type))
         print(res)
         optimal_alpha = res.x[0]
         
         beta = 0
         print("Predicting...")
-        conf_matrix, y_pred, y_pred_disc, y_true = predict(ginf, predict_start_year, end_year, optimal_alpha, beta)
+        conf_matrix, y_pred, y_pred_disc, y_true = predict(ginf, args.predict_start_year, args.end_year, optimal_alpha, beta)
 
-elif optimize == 'N':
+elif args.optimize == 'N':
     print("Training...")
-    if elo_type == 'hpp':
-        train([init_alpha, init_beta], ginf, n_teams, elo_type)
+    if args.elo_type == 'hpp':
+        train([init_alpha, init_beta], ginf, n_teams, args.elo_type)
         
         print("Predicting...")
-        conf_matrix, y_pred, y_pred_disc, y_true = predict(ginf, predict_start_year, end_year, init_alpha, init_beta)
+        conf_matrix, y_pred, y_pred_disc, y_true = predict(ginf, args.predict_start_year, args.end_year, init_alpha, init_beta)
     
-    elif elo_type == 'std':
-        train(init_alpha, ginf, n_teams, elo_type)
+    elif args.elo_type == 'std':
+        train(init_alpha, ginf, n_teams, args.elo_type)
         
         print("Predicting...")
-        conf_matrix, y_pred, y_pred_disc, y_true = predict(ginf, predict_start_year, end_year, init_alpha, 0)
-
-print("Confusion matrix: ")
-print(conf_matrix)
-print(classification_report(y_true, y_pred_disc, target_names=['away win', 'home win'], zero_division=0))
-
-if optimize == 'Y':
-    if elo_type == 'hpp':
-        initial_guess = [init_alpha, init_beta]
-        
-        print("Optimizing...")
-        res = minimize(train, x0=initial_guess, method = 'Nelder-Mead', args=(ginf,n_teams,elo_type))
-        print(res)
-        optimal_alpha = res.x[0]
-        optimal_beta = res.x[1]
-        
-        print("Predicting...")
-        conf_matrix, y_pred, y_pred_disc, y_true = predict(ginf, predict_start_year, end_year, optimal_alpha, optimal_beta)
-    
-    elif elo_type == 'std':
-        print("Optimizing...")
-        res = minimize(train, x0=init_alpha, method = 'Nelder-Mead', args=(ginf,n_teams,elo_type))
-        print(res)
-        optimal_alpha = res.x[0]
-        
-        beta = 0
-        print("Predicting...")
-        conf_matrix, y_pred, y_pred_disc, y_true = predict(ginf, predict_start_year, end_year, optimal_alpha, beta)
-
-elif optimize == 'N':
-    print("Training...")
-    if elo_type == 'hpp':
-        train([init_alpha, init_beta], ginf, n_teams, elo_type)
-        
-        print("Predicting...")
-        conf_matrix, y_pred, y_pred_disc, y_true = predict(ginf, predict_start_year, end_year, init_alpha, init_beta)
-    
-    elif elo_type == 'std':
-        train(init_alpha, ginf, n_teams, elo_type)
-        
-        print("Predicting...")
-        conf_matrix, y_pred, y_pred_disc, y_true = predict(ginf, predict_start_year, end_year, init_alpha, 0)
+        conf_matrix, y_pred, y_pred_disc, y_true = predict(ginf, args.predict_start_year, args.end_year, init_alpha, 0)
 
 print("Confusion matrix: ")
 print(conf_matrix)
