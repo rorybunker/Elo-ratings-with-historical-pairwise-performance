@@ -380,7 +380,8 @@ def import_preprocess_data(file_name, drop_draws, league_country):
     return ginf, n_teams
 
 def main():
-    ginf, n_teams = import_preprocess_data('ginf.csv', drop_draws, league_country)
+    file_path = 'Soccer_Data/ginf.csv'
+    ginf, n_teams = import_preprocess_data(file_path, drop_draws, league_country)
     
     if optimize == 'Y':
         if elo_type == 'hpp':
